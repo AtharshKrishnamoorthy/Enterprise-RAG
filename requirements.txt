@@ -1,0 +1,26 @@
+# Langchain imports 
+
+langchain
+langchain-community
+langchain-core
+langchain-google-genai
+langchain_experimental
+langchain_huggingface
+langchain_openai
+
+# FastAPI imports
+
+fastapi
+uvicorn 
+pydantic 
+
+# Other imports 
+
+pypdf 
+faiss-cpu 
+sentence-transformers
+PyPDF2
+
+# Evaluation 
+
+deepeval

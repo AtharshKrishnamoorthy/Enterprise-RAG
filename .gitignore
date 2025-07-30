@@ -1,0 +1,8 @@
+.env
+.venv
+.venv/** 
+.deepeval
+.deepeval/** 
+__pycache__
+__pycache__/** 
+*.log 
