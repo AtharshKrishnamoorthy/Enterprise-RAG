@@ -46,17 +46,17 @@ class RetrieverPipeline:
         
         logger.info(f"Initializing RetrieverPipeline with query_translation='{query_translation_strategy}', "
                    f"reranking='{reranking_strategy}', embedding_model='{embedding_model}', "
-                   f"top_k={top_k}, llm='gemini-2.0-flash'")
+                   f"top_k={top_k}, llm='gemini-2.5-pro'")
         
         # Validate parameters
         self._validate_parameters(query_translation_strategy, reranking_strategy, embedding_model)
         
         self.query_translation_strategy = query_translation_strategy
         self.reranking_strategy = reranking_strategy
-        self.llm_model = "gemini-2.0-flash"
+        self.llm_model = "gemini-2.5-pro"
         self.embedding_model_name = embedding_model
         self.top_k = top_k
-        self.vectordb = None  # Will be loaded later
+        self.vectordb = None  
         
         # Initialize embedding model
         logger.info(f"Initializing embedding model: {embedding_model}")
@@ -123,7 +123,7 @@ class RetrieverPipeline:
        try:
          if self.vectordb is None:
              logger.info(f"Loading FAISS index from {FAISS_INDEX_PATH}")
-             # Try the newer format first
+            
              try:
                  self.vectordb = FAISS.load_local(
                      folder_path=FAISS_INDEX_PATH,
@@ -131,7 +131,7 @@ class RetrieverPipeline:
                      allow_dangerous_deserialization=True
                  )
              except Exception:
-                 # Fallback to older format
+                 
                  self.vectordb = FAISS.load_local(
                      FAISS_INDEX_PATH,
                      self.embedding_model,
@@ -201,7 +201,7 @@ class RetrieverPipeline:
         # Parse the result to extract queries
         content = result.content if hasattr(result, 'content') else str(result)
         queries = self._parse_multiple_queries(content)
-        queries.insert(0, query)  # Include original query
+        queries.insert(0, query)  
         
         logger.info(f"Generated {len(queries)} query variations")
         for i, q in enumerate(queries):
@@ -289,12 +289,12 @@ class RetrieverPipeline:
         for line in lines:
             line = line.strip()
             if line and not line.startswith('#'):
-                # Remove numbering (1., 2., etc.)
+            
                 clean_line = re.sub(r'^\d+\.?\s*', '', line)
-                if clean_line and len(clean_line) > 10:  # Filter out very short lines
+                if clean_line and len(clean_line) > 10:  
                     queries.append(clean_line)
         
-        return queries[:5]  # Limit to 5 queries max
+        return queries[:5] 
     
     def rerank(self, query: str, documents: List[Document]) -> List[Document]:
         """Rerank documents based on the specified strategy."""
@@ -324,7 +324,7 @@ class RetrieverPipeline:
         """Apply Reciprocal Rank Fusion (RRF) reranking."""
         logger.debug("Applying Reciprocal Rank Fusion")
         
-        # For RRF, we need multiple rankings. Here we'll use semantic similarity and keyword matching
+       
         k = 60  # RRF constant
         
         # Get semantic similarity scores
@@ -369,8 +369,7 @@ class RetrieverPipeline:
         """Apply cross-encoder reranking (simplified version)."""
         logger.debug("Applying cross-encoder reranking")
         
-        # This is a simplified version. In production, you'd use a proper cross-encoder model
-        # For now, we'll use the LLM to score relevance
+       
         
         scored_docs = []
         for i, doc in enumerate(documents[:10]):  # Limit to top 10 for efficiency
@@ -418,7 +417,7 @@ class RetrieverPipeline:
         logger.warning("Cohere reranking not implemented. Falling back to original order.")
         return documents
     
-    def retrieve(self, query: str) -> str:
+    def retrieve(self, query: str, return_evaluation_data: bool = False) -> str | dict:
         """Main retrieval method that handles the complete pipeline."""
         logger.info("="*60)
         logger.info("STARTING RAG RETRIEVAL PIPELINE")
@@ -430,6 +429,7 @@ class RetrieverPipeline:
             logger.info("Step 1/4: Query Translation")
             translated_queries = self.query_translation(query)
             logger.info(f"- Generated {len(translated_queries)} query variations")
+            logger.info(f"Translated queries: {translated_queries}")
             
             # Step 2: Retrieve documents for each query
             logger.info("Step 2/4: Document Retrieval")
@@ -442,6 +442,7 @@ class RetrieverPipeline:
                     docs = retriever.get_relevant_documents(tq)
                     all_documents.extend(docs)
                     logger.debug(f"Retrieved {len(docs)} documents for query {i+1}")
+                    #logging.info(f"Retrieved documents for query {i+1}: {docs}")
                 except Exception as e:
                     logger.warning(f"Error retrieving for query {i+1}: {str(e)}")
             
@@ -455,52 +456,71 @@ class RetrieverPipeline:
                     seen_content.add(content_hash)
             
             logger.info(f"- Retrieved {len(unique_docs)} unique documents")
+            logger.info(f"Unique documents: {unique_docs}")
             
             # Step 3: Reranking
             logger.info("Step 3/4: Document Reranking")
             reranked_docs = self.rerank(query, unique_docs)
             logger.info(f"- Reranking completed, found {len(reranked_docs)} relevant documents")
+            logger.info(f"Reranked documents: {reranked_docs}")
             
             # Step 4: Generate Response
             logger.info("Step 4/4: Response Generation")
-            final_docs = reranked_docs[:self.top_k]  # Use top_k documents
+            final_docs = reranked_docs[:self.top_k]  
             logger.info(f"- Using top {min(self.top_k, len(reranked_docs))} documents for response generation")
+            logger.info(f"Final documents: {final_docs}")
             
             prompt = ChatPromptTemplate.from_template("""
-            You are a helpful assistant who can answer questions based on the provided context. 
-            If the context is not relevant to the query, please say "I don't have enough relevant information to answer this question."
+            You are a helpful assistant who answers user questions based on the given context.
             
-            Context: {context}
+            - First, carefully analyze the context provided.
+            - If the question is not an exact match, try your best to answer it as closely as possible using the most relevant parts of the context.
+            - If the question is completely unrelated and cannot be answered reasonably using the context, respond with: "I don't have enough information in the context to answer that."
             
-            Question: {input}
+            Context:
+            {context}
+            
+            Question:
+            {input}
             
             Answer:
             """)
-            
+    
             # Create document chain
             doc_chain = create_stuff_documents_chain(self.llm, prompt)
-            
-            
             retriever_chain = create_retrieval_chain(retriever, doc_chain)
             
             # Generate response directly without retrieval chain
             logger.debug("Generating final response")
             context = "\n\n".join([doc.page_content for doc in final_docs])
-
-            result = doc_chain.invoke({
-            "context": final_docs,
+    
+            result = retriever_chain.invoke({
+            "context": context,
             "input": query
             })
- 
+    
             answer = result if isinstance(result, str) else result.get("answer", "No answer generated")
-            
-            
             
             logger.info("- Response generated successfully")
             logger.info("="*60)
             logger.info("RAG RETRIEVAL PIPELINE COMPLETED SUCCESSFULLY!")
             logger.info(f"Final answer length: {len(answer)} characters")
             logger.info("="*60)
+            
+            # Return evaluation data if requested
+            if return_evaluation_data:
+                return {
+                    "answer": answer,
+                    "retrieval_context": context,  # Combined context from final documents
+                    "translated_queries": translated_queries,
+                    "retrieved_documents_count": len(all_documents),
+                    "unique_documents_count": len(unique_docs),
+                    "reranked_documents_count": len(reranked_docs),
+                    "final_documents_used": len(final_docs),
+                    "final_documents": [doc.page_content for doc in final_docs],  # Individual document contents
+                    "document_metadata": [doc.metadata for doc in final_docs],  # Document metadata for analysis
+                    "query": query
+                }
             
             return answer
             
@@ -519,14 +539,14 @@ if __name__ == "__main__":
         
         # Initialize retrieval pipeline
         retriever = RetrieverPipeline(
-            query_translation_strategy="hyde",  # Options: "multi_query", "decomposition", "hyde", "step_back", "none"
-            reranking_strategy="cohere",  # Options: "reciprocal_rank_fusion", "cross_encoder", "cohere", "none"
+            query_translation_strategy="none",  # Options: "multi_query", "decomposition", "hyde", "step_back", "none"
+            reranking_strategy="none",  # Options: "reciprocal_rank_fusion", "cross_encoder", "cohere", "none"
             embedding_model="huggingface",  # Options: "huggingface", "google", "openai"
-            top_k=5,  # Number of documents to retrieve
+            top_k=10, 
         )
         
         # Test query
-        test_query = "What is the diffrence btw prompt injection and jailbreaking"
+        test_query = "Provide the top 5 conference hall participants in Amazon"
         logger.info(f"Testing with query: '{test_query}'")
         
         answer = retriever.retrieve(test_query)

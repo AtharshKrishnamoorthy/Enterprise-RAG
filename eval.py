@@ -171,7 +171,6 @@ if __name__ == "__main__":
     
     # Create evaluation pipeline instance
     eval_pipeline = EvaluationPipeline(
-        eval_llm="gemini-2.0-flash-exp",
         query=query,
         answer=answer,
         retrieval_context=retrieval_context,
