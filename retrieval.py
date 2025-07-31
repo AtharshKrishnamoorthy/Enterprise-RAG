@@ -198,6 +198,78 @@ class RetrieverPipeline:
         chain = prompt | self.llm
         result = chain.invoke({"query": query})
         
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        """Retrieve relevant documents based on the query."""
+        logger.info(f"Retrieving documents for query: '{query}'")
+        retriever = self.get_retriever()
+        try:
+            docs = retriever.invoke(query)
+            logger.info(f"Retrieved {len(docs)} documents.")
+            return docs
+        except Exception as e:
+            logger.error(f"Error retrieving documents: {str(e)}")
+            raise
+
+    def retrieve(self, query: str) -> Dict[str, Any]:
+        """Main retrieval method to get answer and relevant documents."""
+        logger.info(f"Starting retrieval process for query: '{query}'")
+        
+        # Step 1: Query Translation
+        translated_queries = self.query_translation(query)
+        logger.info(f"Translated queries: {translated_queries}")
+
+        # Step 2: Document Retrieval for each translated query
+        all_docs = []
+        for t_query in translated_queries:
+            try:
+                all_docs.extend(self.get_relevant_documents(t_query))
+            except Exception as e:
+                logger.warning(f"Could not retrieve documents for translated query '{t_query}': {e}")
+
+        # Remove duplicate documents based on page_content
+        unique_docs_map = {doc.page_content: doc for doc in all_docs}
+        unique_docs = list(unique_docs_map.values())
+        logger.info(f"Found {len(unique_docs)} unique documents after retrieval.")
+
+        if not unique_docs:
+            logger.warning("No documents retrieved for the query.")
+            return {"answer": "I couldn't find any relevant information for your query.", "retrieval_context": []}
+
+        # Step 3: Reranking (if strategy is not 'none')
+        if self.reranking_strategy != "none":
+            logger.info(f"Applying reranking strategy: {self.reranking_strategy}")
+            # Placeholder for reranking logic
+            # For now, just use unique_docs as is, or implement actual reranking
+            # Example: unique_docs = self._apply_reranking(unique_docs, query)
+
+        # Step 4: Generate Answer using LLM
+        logger.info("Generating answer using LLM...")
+        prompt = ChatPromptTemplate.from_template(
+            """Answer the following question based only on the provided context:
+
+            <context>
+            {context}
+            </context>
+
+            Question: {input}"""
+        )
+        document_chain = create_stuff_documents_chain(self.llm, prompt)
+        
+        try:
+            answer = document_chain.invoke({"input": query, "context": unique_docs})
+            logger.info("Answer generated successfully.")
+        except Exception as e:
+            logger.error(f"Error generating answer: {str(e)}")
+            answer = "I encountered an error while generating the answer." # Fallback answer
+
+        retrieval_context_texts = [doc.page_content for doc in unique_docs]
+        
+        return {"answer": answer, "retrieval_context": retrieval_context_texts}
+
+
+
+
+
         # Parse the result to extract queries
         content = result.content if hasattr(result, 'content') else str(result)
         queries = self._parse_multiple_queries(content)
