@@ -24,6 +24,28 @@ import {
 import { RadialBar, RadialBarChart, PolarAngleAxis, PolarRadiusAxis } from "recharts";
 import axios from 'axios';
 
+// Proper type definitions based on your API response
+interface EvaluationResult {
+  score: number;
+  reason?: string;
+  [key: string]: any;
+}
+
+interface EvaluationResponse {
+  status: string;
+  query: string;
+  results: Record<string, EvaluationResult>;
+  summary: {
+    average_score: number;
+    metrics_evaluated: number;
+  };
+  details: {
+    eval_llm: string;
+    answer_length: number;
+    context_length: number;
+  };
+}
+
 interface Message {
   id: string;
   text: string;
@@ -37,33 +59,41 @@ interface Message {
     chunking_strategy?: string;
     vectordb?: string;
   };
-  // Fields for evaluation
+  // Fields for evaluation - updated to match API response
   query?: string;
-  retrievalContext?: string[];
-  evaluationResults?: any; // To store evaluation results
-  expectedOutput?: string; // To store the expected output for evaluation
+  retrievalContext?: string; // Changed from string[] to string to match API
+  finalDocuments?: string[]; // Added to store final documents
+  evaluationResults?: EvaluationResponse;
+  expectedOutput?: string;
 }
 
 const API_BASE_URL = 'http://localhost:8000';
 
-const getScoreColorClass = (score: number | string) => {
+// Safe score color class function with proper null checking
+const getScoreColorClass = (score: number | string | null | undefined): string => {
+  if (score === null || score === undefined) return 'text-gray-500';
+  
   if (typeof score === 'number') {
-    if (score >= 0.8) {
-      return 'text-green-500';
-    } else if (score >= 0.5) {
-      return 'text-yellow-500';
-    } else {
-      return 'text-red-500';
-    }
+    if (score >= 0.8) return 'text-green-500';
+    else if (score >= 0.5) return 'text-yellow-500';
+    else return 'text-red-500';
   } else if (score === 'pass') {
     return 'text-green-500';
   } else if (score === 'fail') {
     return 'text-red-500';
   }
-  return '';
+  return 'text-gray-500';
 };
 
-// Configuration options with descriptions
+// Safe score extraction function
+const getScoreValue = (result: any): number | null => {
+  if (result && typeof result === 'object' && 'score' in result && typeof result.score === 'number') {
+    return result.score;
+  }
+  return null;
+};
+
+// Updated configuration options to match API parameters
 const CONFIG_OPTIONS = {
   queryTranslation: {
     none: { label: 'None', description: 'Direct query without transformation' },
@@ -84,8 +114,9 @@ const CONFIG_OPTIONS = {
     openai: { label: 'OpenAI', description: 'OpenAI text-embedding models' },
   },
   chunkingStrategy: {
-    fixed: { label: 'Fixed', description: 'Fixed-size text chunks' },
-    semantic: { label: 'Semantic', description: 'Meaning-based chunking' },
+    recursive: { label: 'Recursive', description: 'Recursive text splitting' },
+    sentence: { label: 'Sentence', description: 'Sentence-based chunking' },
+    token: { label: 'Token', description: 'Token-based chunking' },
     raptor: { label: 'RAPTOR', description: 'Recursive clustering approach' },
   },
   vectordb: {
@@ -97,16 +128,18 @@ export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [evaluating, setEvaluating] = useState(false);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Configuration states
+  // Configuration states - updated defaults to match API expectations
   const [queryTranslation, setQueryTranslation] = useState('hyde');
-  const [reranking, setReranking] = useState('cohere');
+  const [reranking, setReranking] = useState('reciprocal_rank_fusion'); // Changed from 'cohere' to match API
   const [embeddingModel, setEmbeddingModel] = useState('huggingface');
   const [chunkingStrategy, setChunkingStrategy] = useState('raptor');
   const [vectordb, setVectordb] = useState('faiss');
+  const [topK, setTopK] = useState(5); // Added topK state
 
   const sendMessage = async () => {
     if (input.trim() === '') return;
@@ -143,10 +176,13 @@ export function ChatInterface() {
           },
         ]);
       } else {
+        // Updated retrieval API call to include all required parameters
         const response = await axios.post(`${API_BASE_URL}/retrieval`, {
           query: currentInput,
           embedding_model: embeddingModel,
-          top_k: 5,
+          top_k: topK,
+          query_translation_strategy: queryTranslation,
+          reranking_strategy: reranking,
         });
         
         setMessages((prev) => [
@@ -157,18 +193,30 @@ export function ChatInterface() {
             sender: 'bot',
             type: 'text',
             timestamp: new Date(),
-            query: currentInput, // Store the original query
-            retrievalContext: response.data.retrieval_context || [], // Assuming retrieval_context is returned
+            query: currentInput,
+            retrievalContext: response.data.retrieval_context || '', // Handle as string
+            finalDocuments: response.data.expected_output || [], // Store final documents
+            expectedOutput: response.data.expected_output ? response.data.expected_output.join('\n') : '',
           },
         ]);
       }
     } catch (error) {
       console.error('API call failed:', error);
+      let errorMessage = '❌ Unable to process your request. Please try again.';
+      
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          errorMessage = '❌ Vector database not found. Please run ingestion first by typing "ingest files".';
+        } else if (error.response?.data?.detail) {
+          errorMessage = `❌ Error: ${error.response.data.detail}`;
+        }
+      }
+      
       setMessages((prev) => [
         ...prev,
         {
           id: Date.now().toString() + '-error',
-          text: '❌ Unable to process your request. Please check the API server connection and try again.',
+          text: errorMessage,
           sender: 'bot',
           type: 'text',
           timestamp: new Date(),
@@ -181,7 +229,7 @@ export function ChatInterface() {
   };
 
   const sendConfigMessage = (config: Message['config']) => {
-    const configDetails = Object.entries(config)
+    const configDetails = Object.entries(config || {})
       .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${value}`)
       .join(', ');
       
@@ -211,30 +259,48 @@ export function ChatInterface() {
 
   const handleEvaluate = async (message: Message) => {
     if (!message.query || !message.retrievalContext) {
-      toast.error('Missing data for evaluation.');
+      toast.error('Missing data for evaluation (query or retrieval context).');
       return;
     }
 
     try {
+      setEvaluating(true);
+      
+      // Updated evaluation API call to match the expected format
       const response = await axios.post(`${API_BASE_URL}/evaluation`, {
         query: message.query,
         answer: message.text,
-        retrieval_context: message.retrievalContext.join('\n'), // Join array into a single string
-        expected_output: message.query // Using query as expected output for now
+        retrieval_context: message.retrievalContext, // Already a string
+        expected_output: message.expectedOutput || message.query, // Use expectedOutput if available
       });
 
-      console.log('Evaluation Results:', response.data);
-      toast.success('Evaluation completed! Check console for results.');
+      // Debug logging to see the actual API response structure
+      console.log('Full Evaluation API Response:', response.data);
+      console.log('Results structure:', JSON.stringify(response.data.results, null, 2));
+      
+      // Validate the response structure
+      if (!response.data.results) {
+        throw new Error('No results found in evaluation response');
+      }
+
+      toast.success('Evaluation completed successfully!');
 
       // Update the message with evaluation results
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === message.id ? { ...m, evaluationResults: response.data.results } : m
+          m.id === message.id ? { ...m, evaluationResults: response.data } : m
         )
       );
     } catch (error) {
       console.error('Error during evaluation:', error);
-      toast.error('Failed to run evaluation.');
+      if (axios.isAxiosError(error)) {
+        console.error('Response data:', error.response?.data);
+        toast.error(`Evaluation failed: ${error.response?.data?.detail || error.message}`);
+      } else {
+        toast.error('Failed to run evaluation.');
+      }
+    } finally {
+      setEvaluating(false);
     }
   };
 
@@ -315,6 +381,26 @@ export function ChatInterface() {
                 </div>
                 
                 <div className="p-4 space-y-6 max-h-96 overflow-y-auto">
+                  {/* Top K Parameter */}
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Label className="font-medium">Top K Documents</Label>
+                    </div>
+                    <Input
+                      type="number"
+                      value={topK}
+                      onChange={(e) => setTopK(parseInt(e.target.value) || 5)}
+                      min="1"
+                      max="20"
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      Number of documents to retrieve (1-20)
+                    </p>
+                  </div>
+
+                  <Separator />
+
                   {/* Query Translation */}
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
@@ -568,21 +654,22 @@ export function ChatInterface() {
                                 <TooltipContent>Copy message</TooltipContent>
                               </Tooltip>
                               <Tooltip>
-                                 <TooltipTrigger asChild>
-                                   <Button
-                                     variant="secondary"
-                                     size="sm"
-                                     onClick={() => handleEvaluate(msg)}
-                                     className="h-6 px-2 py-1 text-xs transition-opacity ml-2"
-                                   >
-                                     Evaluate
-                                   </Button>
-                                 </TooltipTrigger>
-                                 <TooltipContent>Evaluate response</TooltipContent>
-                             </Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => handleEvaluate(msg)}
+                                    className="h-6 px-2 py-1 text-xs transition-opacity ml-2"
+                                    disabled={evaluating}
+                                  >
+                                    {evaluating ? 'Evaluating...' : 'Evaluate'}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Evaluate response</TooltipContent>
+                              </Tooltip>
                             </div>
                           )}
-                          {msg.evaluationResults && ( // Display evaluation results if present
+                          {msg.evaluationResults && (
                             <Tabs defaultValue="results" className="mt-2">
                               <TabsList>
                                 <TabsTrigger value="results">Evaluation Results</TabsTrigger>
@@ -592,96 +679,175 @@ export function ChatInterface() {
                                 <div className="p-2 bg-gray-100 dark:bg-gray-700 rounded-md text-xs text-gray-700 dark:text-gray-300">
                                   <p className="font-semibold">Evaluation Results:</p>
                                   {msg.evaluationResults.summary && (
-                                    <p className="font-bold text-sm mt-1">Average Score: <span className={`${msg.evaluationResults.summary.average_score >= 0.8 ? 'text-green-600' : msg.evaluationResults.summary.average_score >= 0.5 ? 'text-yellow-600' : 'text-red-600'}`}>{msg.evaluationResults.summary.average_score}</span></p>
+                                    <p className="font-bold text-sm mt-1">
+                                      Average Score: 
+                                      <span className={`ml-1 ${getScoreColorClass(msg.evaluationResults.summary.average_score)}`}>
+                                        {msg.evaluationResults.summary.average_score}
+                                      </span>
+                                    </p>
                                   )}
-                                  {Object.entries(msg.evaluationResults.results).map(([metric, data]) => {
-                                    const score = (data as any).score;
-                                    const reason = (data as any).reason;
-                                    let scoreColorClass = '';
-                                    if (typeof score === 'number') {
-                                      if (score >= 0.8) {
-                                        scoreColorClass = 'text-green-500';
-                                      } else if (score >= 0.5) {
-                                        scoreColorClass = 'text-yellow-500';
-                                      } else {
-                                        scoreColorClass = 'text-red-500';
-                                      }
-                                    }
+                                  {msg.evaluationResults.results && Object.entries(msg.evaluationResults.results).map(([metric, data]) => {
+                                    const score = getScoreValue(data);
+                                    const reason = data && typeof data === 'object' && 'reason' in data ? data.reason : null;
+                                    
                                     return (
                                       <div key={metric} className="mt-2">
-                                        <p className="font-medium capitalize">- {metric.replace(/_/g, ' ')}: <span className={scoreColorClass}>{score !== undefined ? score : 'N/A'}</span></p>
-                                        {reason && <p className="ml-4 text-gray-600 dark:text-gray-400">Reason: {reason}</p>}
+                                        <p className="font-medium capitalize">
+                                          - {metric.replace(/_/g, ' ')}: 
+                                          <span className={`ml-1 ${getScoreColorClass(score)}`}>
+                                            {score !== null ? score : 'N/A'}
+                                          </span>
+                                        </p>
+                                        {reason && (
+                                          <p className="ml-4 text-gray-600 dark:text-gray-400">Reason: {reason}</p>
+                                        )}
                                       </div>
                                     );
                                   })}
                                 </div>
                               </TabsContent>
-                              <TabsContent value="charts">
-                                 {msg.evaluationResults && msg.evaluationResults.results && Object.keys(msg.evaluationResults.results).length > 0 ? (
-                                   <ChartContainer
-                                     config={Object.fromEntries(
-                                       Object.entries(msg.evaluationResults.results).map(
-                                         ([metric, result]) => [
-                                           metric,
-                                           {
-                                             label: metric.replace(/_/g, " "),
-                                             color: getScoreColorClass(
-                                               typeof result.score === "number"
-                                                 ? result.score
-                                                 : result.score === "pass"
-                                                   ? 1
-                                                   : 0,
-                                             ).replace("text-", ""),
-                                           },
-                                         ],
-                                       ),
-                                     )}
-                                     className="h-48 w-full"
-                                   >
-                                     <RadialBarChart
-                                       accessibilityLayer
-                                       data={Object.entries(msg.evaluationResults.results).map(
-                                         ([metric, result]) => ({
-                                           metric: metric.replace(/_/g, " "),
-                                           score: typeof result.score === "number"
-                                             ? result.score * 100
-                                             : result.score === "pass"
-                                               ? 100
-                                               : 0,
-                                         }),
-                                       )}
-                                       innerRadius="10%"
-                                       outerRadius="80%"
-                                       startAngle={90}
-                                       endAngle={-270}
-                                     >
-                                       <PolarAngleAxis
-                                         type="number"
-                                         domain={[0, 100]}
-                                         angleAxisId={0}
-                                         tick={false}
-                                       />
-                                       <PolarRadiusAxis
-                                         angle={90}
-                                         domain={[0, 100]}
-                                         tick={false}
-                                         axisLine={false}
-                                       />
-                                       <ChartTooltip
-                                         cursor={false}
-                                         content={<ChartTooltipContent hideLabel />}
-                                       />
-                                       <RadialBar dataKey="score" fill="var(--color-score)" cornerRadius={5} />
-                                     </RadialBarChart>
-                                   </ChartContainer>
-                                 ) : (
-                                   <div className="h-48 w-full rounded-md bg-gray-100 p-2 dark:bg-gray-800">
-                                     <p className="text-center text-muted-foreground">
-                                       No evaluation results available to display chart.
-                                     </p>
-                                   </div>
-                                 )}
-                               </TabsContent>
+                              <TabsContent value="charts" className="border border-black rounded-lg p-4">
+                                {msg.evaluationResults?.results && Object.keys(msg.evaluationResults.results).length > 0 ? (
+                                  <div className="space-y-4">
+                                    {/* Radial Chart for All Metrics */}
+                                    <ChartContainer
+                                      config={Object.fromEntries(
+                                        Object.entries(msg.evaluationResults.results).map(([metric, result], index) => {
+                                          const score = getScoreValue(result);
+                                          // Generate different colors for each metric
+                                          const colors = ['blue', 'green', 'orange', 'purple', 'red', 'cyan', 'pink'];
+                                          const colorName = colors[index % colors.length];
+                                          return [
+                                            metric,
+                                            {
+                                              label: metric.replace(/_/g, " "),
+                                              color: `hsl(var(--${colorName}))`,
+                                            },
+                                          ];
+                                        })
+                                      )}
+                                      className="h-64 w-full"
+                                    >
+                                      <RadialBarChart
+                                        accessibilityLayer
+                                        data={Object.entries(msg.evaluationResults.results).map(([metric, result], index) => {
+                                          const score = getScoreValue(result);
+                                          const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#ec4899'];
+                                          return {
+                                            metric: metric.replace(/_/g, " "),
+                                            score: score !== null ? score * 100 : 0,
+                                            fill: colors[index % colors.length],
+                                          };
+                                        })}
+                                        innerRadius="20%"
+                                        outerRadius="90%"
+                                        startAngle={90}
+                                        endAngle={450}
+                                      >
+                                        <PolarAngleAxis
+                                          type="number"
+                                          domain={[0, 100]}
+                                          angleAxisId={0}
+                                          tick={false}
+                                        />
+                                        <PolarRadiusAxis
+                                          angle={90}
+                                          domain={[0, 100]}
+                                          tick={false}
+                                          axisLine={false}
+                                        />
+                                        <ChartTooltip
+                                          cursor={false}
+                                          content={({ active, payload }) => {
+                                            if (active && payload && payload.length) {
+                                              const data = payload[0].payload;
+                                              return (
+                                                <div className="bg-white dark:bg-gray-800 p-2 border rounded shadow-lg">
+                                                  <p className="font-medium capitalize">{data.metric}</p>
+                                                  <p className="text-sm">Score: {(data.score / 100).toFixed(2)}</p>
+                                                </div>
+                                              );
+                                            }
+                                            return null;
+                                          }}
+                                        />
+                                        {Object.entries(msg.evaluationResults.results).map(([metric, result], index) => (
+                                          <RadialBar
+                                            key={metric}
+                                            dataKey="score"
+                                            cornerRadius={5}
+                                            fill={`var(--color-${metric})`}
+                                            data={[{
+                                              metric: metric.replace(/_/g, " "),
+                                              score: getScoreValue(result) !== null ? getScoreValue(result)! * 100 : 0,
+                                            }]}
+                                          />
+                                        ))}
+                                      </RadialBarChart>
+                                    </ChartContainer>
+
+                                    {/* Legend */}
+                                    <div className="grid grid-cols-2 gap-2 text-xs">
+                                      {Object.entries(msg.evaluationResults.results).map(([metric, result], index) => {
+                                        const score = getScoreValue(result);
+                                        const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#ec4899'];
+                                        return (
+                                          <div key={metric} className="flex items-center gap-2">
+                                            <div 
+                                              className="w-3 h-3 rounded-full" 
+                                              style={{ backgroundColor: colors[index % colors.length] }}
+                                            ></div>
+                                            <span className="capitalize truncate">
+                                              {metric.replace(/_/g, " ")}: {score !== null ? score.toFixed(2) : 'N/A'}
+                                            </span>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {/* Summary Statistics */}
+                                    <div className="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3 space-y-2">
+                                      <h4 className="font-medium text-sm">Summary</h4>
+                                      <div className="grid grid-cols-2 gap-4 text-xs">
+                                        <div>
+                                          <span className="text-gray-600 dark:text-gray-400">Average Score:</span>
+                                          <span className={`ml-2 font-medium ${getScoreColorClass(msg.evaluationResults.summary?.average_score)}`}>
+                                            {msg.evaluationResults.summary?.average_score?.toFixed(2) || 'N/A'}
+                                          </span>
+                                        </div>
+                                        <div>
+                                          <span className="text-gray-600 dark:text-gray-400">Metrics Count:</span>
+                                          <span className="ml-2 font-medium">
+                                            {Object.keys(msg.evaluationResults.results).length}
+                                          </span>
+                                        </div>
+                                        <div>
+                                          <span className="text-gray-600 dark:text-gray-400">Highest Score:</span>
+                                          <span className="ml-2 font-medium text-green-600">
+                                            {Math.max(...Object.values(msg.evaluationResults.results)
+                                              .map(result => getScoreValue(result))
+                                              .filter(score => score !== null) as number[]).toFixed(2)}
+                                          </span>
+                                        </div>
+                                        <div>
+                                          <span className="text-gray-600 dark:text-gray-400">Lowest Score:</span>
+                                          <span className="ml-2 font-medium text-red-600">
+                                            {Math.min(...Object.values(msg.evaluationResults.results)
+                                              .map(result => getScoreValue(result))
+                                              .filter(score => score !== null) as number[]).toFixed(2)}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="h-48 w-full rounded-md bg-gray-100 p-2 dark:bg-gray-800">
+                                    <p className="text-center text-muted-foreground">
+                                      No evaluation results available to display chart.
+                                    </p>
+                                  </div>
+                                )}
+                              </TabsContent>
                             </Tabs>
                           )}
                         </div>
@@ -735,7 +901,7 @@ export function ChatInterface() {
             >
               <Avatar className="w-10 h-10 shadow-lg ring-2 ring-blue-100 dark:ring-blue-900/30">
                 <AvatarFallback className="bg-gradient-to-br from-blue-500 to-purple-600 text-white">
-                  <Bot className="w-6 h-6" />
+                  <Bot className="w-6 w-6" />
                 </AvatarFallback>
               </Avatar>
               <div className="p-4 rounded-2xl rounded-bl-md bg-white/80 dark:bg-gray-800/80 border border-gray-200/50 dark:border-gray-700/50 shadow-lg backdrop-blur-sm">
@@ -804,8 +970,8 @@ export function ChatInterface() {
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" align="center">
-            <p>Send Message</p>
-          </TooltipContent>
+                <p>Send Message</p>
+              </TooltipContent>
             </Tooltip>
           </div>
           

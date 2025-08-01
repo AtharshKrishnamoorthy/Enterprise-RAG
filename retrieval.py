@@ -543,11 +543,12 @@ class RetrieverPipeline:
             logger.info(f"Final documents: {final_docs}")
             
             prompt = ChatPromptTemplate.from_template("""
-            You are a helpful assistant who answers user questions based on the given context.
+            You are a helpful assistant who answers user questions based on the given context and helping the users out there.
             
             - First, carefully analyze the context provided.
             - If the question is not an exact match, try your best to answer it as closely as possible using the most relevant parts of the context.
             - If the question is completely unrelated and cannot be answered reasonably using the context, respond with: "I don't have enough information in the context to answer that."
+            - If the user is just chatting and not asking a question , then continue to chat without considering about the context provided.
             
             Context:
             {context}

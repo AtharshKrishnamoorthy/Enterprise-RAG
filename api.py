@@ -39,7 +39,9 @@ class RetrievalInput(BaseModel):
     """Input model for the retrieval endpoint."""
     query: str = Field(..., description="The query to retrieve information for")
     embedding_model: str = Field(..., description="Embedding model to use (e.g., 'huggingface', 'google', 'openai')")
-    top_k: int = Field(5, description="Number of documents to retrieve and use for generating the answer")
+    top_k: int = Field(..., description="Number of documents to retrieve and use for generating the answer")
+    query_translation_strategy: str = Field(..., description="Query translation strategy to use (e.g., 'hyde', 'dpr', 'none')")
+    reranking_strategy: str = Field(..., description="Reranking strategy to use (e.g., 'reciprocal_rank_fusion', 'none')")
 
 class EvaluationInput(BaseModel):
     """Input model for the evaluation endpoint."""
@@ -212,24 +214,40 @@ async def run_retrieval(input_data: RetrievalInput):
         
         # Initialize the retrieval pipeline
         pipeline = RetrieverPipeline(
-            query_translation_strategy="hyde",  # Using a default strategy
-            reranking_strategy="reciprocal_rank_fusion",  # Using a default strategy
+            query_translation_strategy=input_data.query_translation_strategy,
+            reranking_strategy=input_data.reranking_strategy,
             embedding_model=input_data.embedding_model,
-            top_k=input_data.top_k  # Use the top_k parameter from the input
+            top_k=input_data.top_k
         )
         
-        # Run the retrieval process
-        answer = pipeline.retrieve(input_data.query)
+        # Run the retrieval process with return_evaluation_data=True to get detailed results
+        result = pipeline.retrieve(input_data.query, return_evaluation_data=True)
+        
+        # Handle both cases: if retrieve returns a dict or just a string
+        if isinstance(result, dict):
+            # If retrieve returns a dictionary with detailed information
+            answer = result.get("answer", "")
+            retrieval_context = result.get("retrieval_context", "")
+            final_documents = result.get("final_documents", [])
+        else:
+            # If retrieve returns just the answer string
+            answer = result
+            retrieval_context = ""
+            final_documents = []
         
         return {
             "status": "success",
             "query": input_data.query,
             "answer": answer,
+            "retrieval_context": retrieval_context,
+            "expected_output": final_documents,
             "details": {
                 "embedding_model": input_data.embedding_model,
                 "top_k": input_data.top_k,
-                "query_translation_strategy": "hyde",
-                "reranking_strategy": "none"
+                "query_translation_strategy": input_data.query_translation_strategy,
+                "reranking_strategy": input_data.reranking_strategy,
+                "answer_length": len(answer),
+                "context_length": len(retrieval_context)
             }
         }
     except HTTPException:
